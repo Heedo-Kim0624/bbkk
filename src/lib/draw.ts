@@ -30,12 +30,39 @@ export const MAX_HISTORY = 30
 export const PALETTE = ['#96dac6', '#f2b99e', '#bfb4ed', '#a5c9ed', '#e8d798']
 
 export const DEFAULT_ITEMS: DrawItem[] = [
-  { id: 'lunch-1', label: '김치찌개', weight: 30, color: PALETTE[0] },
-  { id: 'lunch-2', label: '파스타', weight: 25, color: PALETTE[1] },
-  { id: 'lunch-3', label: '초밥', weight: 20, color: PALETTE[2] },
-  { id: 'lunch-4', label: '쌀국수', weight: 15, color: PALETTE[3] },
-  { id: 'lunch-5', label: '샌드위치', weight: 10, color: PALETTE[4] },
+  { id: 'penalty-1', label: '청소 20분', weight: 20, color: PALETTE[0] },
+  { id: 'penalty-2', label: '설거지 전담', weight: 20, color: PALETTE[1] },
+  { id: 'penalty-3', label: '친구에게 커피 사기', weight: 20, color: PALETTE[2] },
+  { id: 'penalty-4', label: '배달 대신 직접 요리', weight: 20, color: PALETTE[3] },
+  { id: 'penalty-5', label: '미뤄둔 일 30분', weight: 20, color: PALETTE[4] },
 ]
+
+// Keep the historic seed literal so later palette changes cannot broaden this migration.
+const LEGACY_LUNCH_ITEMS: DrawItem[] = [
+  { id: 'lunch-1', label: '김치찌개', weight: 30, color: '#96dac6' },
+  { id: 'lunch-2', label: '파스타', weight: 25, color: '#f2b99e' },
+  { id: 'lunch-3', label: '초밥', weight: 20, color: '#bfb4ed' },
+  { id: 'lunch-4', label: '쌀국수', weight: 15, color: '#a5c9ed' },
+  { id: 'lunch-5', label: '샌드위치', weight: 10, color: '#e8d798' },
+]
+
+/** Updates only the exact unused starter list; edited lists and past draws remain untouched. */
+export function migrateRunningDefaults(state: SavedState): SavedState {
+  if (state.history.length > 0
+    || state.excludedIds.length > 0
+    || state.items.length !== LEGACY_LUNCH_ITEMS.length) return state
+
+  const untouchedSeed = state.items.every((item, index) => {
+    const original = LEGACY_LUNCH_ITEMS[index]
+    return item.id === original.id
+      && item.label === original.label
+      && item.weight === original.weight
+      && item.color === original.color
+  })
+  return untouchedSeed
+    ? { ...state, items: DEFAULT_ITEMS.map((item) => ({ ...item })) }
+    : state
+}
 
 export function getEligibleItems(items: DrawItem[], excludedIds: string[] = []): DrawItem[] {
   const excluded = new Set(excludedIds)

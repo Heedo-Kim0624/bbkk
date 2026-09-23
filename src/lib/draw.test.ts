@@ -6,11 +6,13 @@ import {
   MAX_LABEL_LENGTH,
   PALETTE,
   getEligibleItems,
+  migrateRunningDefaults,
   parseSavedState,
   pickWeighted,
   probabilities,
   type DrawItem,
   type DrawResult,
+  type SavedState,
 } from './draw'
 
 const item = (id: string, weight = 1, label = id): DrawItem => ({
@@ -107,10 +109,94 @@ describe('weighted selection', () => {
     expect(Object.prototype.hasOwnProperty.call(odds, '__proto__')).toBe(true)
   })
 
-  it('ships five lunch options whose default weights total 100', () => {
+  it('ships five running commitment penalties with equal default probabilities', () => {
     expect(DEFAULT_ITEMS).toHaveLength(5)
-    expect(DEFAULT_ITEMS.map(({ weight }) => weight)).toEqual([30, 25, 20, 15, 10])
+    expect(DEFAULT_ITEMS.map(({ label }) => label)).toEqual([
+      '청소 20분',
+      '설거지 전담',
+      '친구에게 커피 사기',
+      '배달 대신 직접 요리',
+      '미뤄둔 일 30분',
+    ])
+    expect(Object.values(probabilities(DEFAULT_ITEMS))).toEqual([20, 20, 20, 20, 20])
     expect(new Set(DEFAULT_ITEMS.map(({ id }) => id)).size).toBe(5)
+  })
+})
+
+function legacyState(): SavedState {
+  return {
+    items: [
+      { id: 'lunch-1', label: '김치찌개', weight: 30, color: '#96dac6' },
+      { id: 'lunch-2', label: '파스타', weight: 25, color: '#f2b99e' },
+      { id: 'lunch-3', label: '초밥', weight: 20, color: '#bfb4ed' },
+      { id: 'lunch-4', label: '쌀국수', weight: 15, color: '#a5c9ed' },
+      { id: 'lunch-5', label: '샌드위치', weight: 10, color: '#e8d798' },
+    ],
+    history: [],
+    excludeWinners: false,
+    excludedIds: [],
+    soundEnabled: false,
+  }
+}
+
+describe('running defaults migration', () => {
+  it('replaces only an untouched legacy seed and preserves all other settings', () => {
+    const state = { ...legacyState(), excludeWinners: true, soundEnabled: true }
+    const restored = parseSavedState(JSON.stringify(state))
+    expect(restored).not.toBeNull()
+    const migrated = migrateRunningDefaults(restored!)
+
+    expect(migrated).toEqual({ ...state, items: DEFAULT_ITEMS })
+    expect(migrated.items).not.toBe(DEFAULT_ITEMS)
+    expect(migrated.items[0]).not.toBe(DEFAULT_ITEMS[0])
+    expect(restored?.items).toEqual(state.items)
+    expect(migrateRunningDefaults(migrated)).toBe(migrated)
+  })
+
+  it.each<Partial<DrawItem>>([
+    { id: 'my-first-choice' },
+    { label: '내가 정한 벌칙' },
+    { weight: 31 },
+    { color: '#123456' },
+  ])('preserves a customized item field: %o', (change) => {
+    const state = legacyState()
+    state.items[0] = { ...state.items[0], ...change }
+    expect(migrateRunningDefaults(state)).toBe(state)
+  })
+
+  it('preserves rearranged legacy choices', () => {
+    const state = legacyState()
+    state.items.reverse()
+    expect(migrateRunningDefaults(state)).toBe(state)
+  })
+
+  it('preserves an existing draw history', () => {
+    const state = legacyState()
+    state.history = [{ ...result('legacy-draw'), itemId: 'lunch-1', label: '김치찌개' }]
+    expect(migrateRunningDefaults(state)).toBe(state)
+  })
+
+  it('preserves existing winner exclusions even without a history', () => {
+    const state = legacyState()
+    state.excludeWinners = true
+    state.excludedIds = ['lunch-1']
+    expect(migrateRunningDefaults(state)).toBe(state)
+  })
+
+  it('preserves intentionally empty and custom lists', () => {
+    for (const items of [[], [item('custom-choice', 20, '내가 정한 벌칙')]]) {
+      const state = { ...legacyState(), items }
+      expect(migrateRunningDefaults(state)).toBe(state)
+    }
+  })
+
+  it('preserves lists with added or removed choices', () => {
+    const smaller = legacyState()
+    smaller.items.pop()
+    const larger = legacyState()
+    larger.items.push(item('custom-choice', 20, '추가한 벌칙'))
+    expect(migrateRunningDefaults(smaller)).toBe(smaller)
+    expect(migrateRunningDefaults(larger)).toBe(larger)
   })
 })
 
