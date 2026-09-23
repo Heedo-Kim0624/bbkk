@@ -1,0 +1,45 @@
+# Dependencies and build output
+node_modules/
+dist/
+.vercel/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
+# Local configuration and credentials
+.env
+.env.*
+*.local
+
+# Personal workspace harness and generated evidence
+.agentos/
+.jarvis/
+.vscode/
+AGENTS.md
+*.code-workspace
+harness_registry.yaml
+provider_registry.yaml
+DESIGN.md
+DISTILLATION.md
+PROJECT-HARNESS.md
+START-HERE.md
+TASKS.md
+VERIFY.md
+agents/
+api/
+context/
+inputs/
+logs/
+outputs/
+prompts/
+review/
+skills/
+tools/
+workflow/
+scripts/clean_traces.ps1
+docs/design.md
+docs/decisions.md
+docs/changelog.md
+__pycache__/
+.pytest_cache/

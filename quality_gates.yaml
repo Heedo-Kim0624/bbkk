@@ -1,0 +1,33 @@
+quality_gates:
+  lint:
+    command: "npm run lint"
+    state: configured
+    required: true
+  typecheck:
+    command: "npm run typecheck"
+    state: configured
+    required: true
+  unit:
+    command: "npm test"
+    state: configured
+    required: true
+  build:
+    command: "npm run build"
+    state: configured
+    required: true
+  integration:
+    command: ""
+    state: not_configured
+    required: false
+  contract:
+    command: ""
+    state: not_configured
+    required: false
+  e2e:
+    command: "npm run test:e2e"
+    state: configured
+    required: false
+  secret_scan:
+    command: "manual-secret-boundary-review"
+    state: configured_manual
+    required: true
