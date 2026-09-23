@@ -25,13 +25,36 @@ export type PendingEgg = {
   createdAt: number
 }
 
+export type DrawCard = {
+  itemId: string
+  label: string
+  color: string
+  probability: number
+  tier: TierId
+}
+
+export type PendingSpread = {
+  kind: 'cards'
+  id: string
+  createdAt: number
+  cards: DrawCard[]
+}
+
+export type RevealedSpread = {
+  id: string
+  drawnAt: number
+  cards: DrawCard[]
+  selectedIndex: number
+}
+
 export type SavedState = {
   items: DrawItem[]
   history: DrawResult[]
   excludeWinners: boolean
   excludedIds: string[]
   soundEnabled: boolean
-  pending: PendingEgg | null
+  pending: PendingEgg | PendingSpread | null
+  revealed?: RevealedSpread | null
 }
 
 export const STORAGE_KEY = 'bbob-studio-v1'
@@ -154,6 +177,65 @@ export function openEgg(pending: PendingEgg, random: () => number = secureRandom
   }
 }
 
+function cardFromPool(tierId: TierId, candidates: DrawItem[], random: () => number): DrawCard {
+  const winner = candidates[Math.floor(randomSample(random) * candidates.length)]
+  const tier = TIERS.find(tier => tier.id === tierId)!
+  return {
+    itemId: winner.id, label: winner.label, color: winner.color,
+    probability: tier.probability / candidates.length, tier: tierId,
+  }
+}
+
+/** Every position independently draws a tier and an item, with replacement. */
+export function createPendingSpread(
+  items: DrawItem[], excludedIds: string[] = [], random: () => number = secureRandom,
+): PendingSpread | null {
+  const eligible = getEligibleItems(items, excludedIds)
+  if (getMissingTiers(eligible).length > 0 || eligible.length > MAX_ITEMS
+    || new Set(eligible.map(item => item.id)).size !== eligible.length
+    || eligible.some(item => !validId(item.id) || item.label.length > MAX_LABEL_LENGTH
+      || !/^#[0-9a-f]{6}$/i.test(item.color))) return null
+
+  const cards = Array.from({ length: 5 }, () => {
+    const tier = pickTier(random)
+    return cardFromPool(tier, eligible.filter(item => item.tier === tier), random)
+  })
+  return { kind: 'cards', id: globalThis.crypto.randomUUID(), createdAt: Date.now(), cards }
+}
+
+/** Legacy eggs retain their already drawn tier; current decks are cloned without any reroll. */
+export function preparePendingSpread(
+  pending: PendingEgg | PendingSpread | null, random: () => number = secureRandom,
+): PendingSpread | null {
+  if (!isRecord(pending)) return null
+  if ('kind' in pending) return pending.kind === 'cards' ? restorePendingSpread(pending) : null
+  const egg = restorePending(pending)
+  if (!egg) return null
+  return {
+    kind: 'cards', id: egg.id, createdAt: egg.createdAt,
+    cards: Array.from({ length: 5 }, () => cardFromPool(egg.tier, egg.candidates, random)),
+  }
+}
+
+/** Selection only reads the preassigned card. It never samples randomness. */
+export function chooseSpread(
+  pending: PendingSpread, index: number,
+): { result: DrawResult; revealed: RevealedSpread } | null {
+  const spread = restorePendingSpread(pending)
+  if (!spread || !Number.isInteger(index) || index < 0 || index >= spread.cards.length) return null
+  const revealed: RevealedSpread = {
+    id: spread.id, drawnAt: Date.now(), cards: spread.cards, selectedIndex: index,
+  }
+  return { result: resultFromSpread(revealed), revealed }
+}
+
+/** Call with a validated revealed spread, such as one returned by parseSavedState. */
+export function resultFromSpread(revealed: RevealedSpread): DrawResult {
+  const valid = restoreRevealedSpread(revealed)
+  if (!valid) throw new RangeError('Invalid revealed spread.')
+  return { id: valid.id, drawnAt: valid.drawnAt, ...valid.cards[valid.selectedIndex] }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -237,6 +319,51 @@ function restorePending(value: unknown): PendingEgg | null {
   return { id: value.id, tier: value.tier, candidates, createdAt: value.createdAt }
 }
 
+function restoreCards(value: unknown): DrawCard[] | null {
+  if (!Array.isArray(value) || value.length !== 5) return null
+  const cards: DrawCard[] = []
+  const identities = new Map<string, DrawCard>()
+  for (const entry of value) {
+    if (!isRecord(entry) || !validId(entry.itemId)
+      || typeof entry.label !== 'string' || !entry.label.trim()
+      || entry.label !== entry.label.trim() || entry.label.length > MAX_LABEL_LENGTH
+      || typeof entry.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(entry.color)
+      || !isTier(entry.tier) || typeof entry.probability !== 'number'
+      || !Number.isFinite(entry.probability) || entry.probability <= 0 || entry.probability > 100) return null
+    const card: DrawCard = {
+      itemId: entry.itemId, label: entry.label, color: entry.color,
+      tier: entry.tier, probability: entry.probability,
+    }
+    const previous = identities.get(card.itemId)
+    if (previous && (previous.label !== card.label || previous.color !== card.color
+      || previous.tier !== card.tier || previous.probability !== card.probability)) return null
+    identities.set(card.itemId, card)
+    cards.push(card)
+  }
+  return cards
+}
+
+function restorePendingSpread(value: unknown): PendingSpread | null {
+  if (!isRecord(value) || value.kind !== 'cards' || !validId(value.id) || !validTime(value.createdAt)) return null
+  const cards = restoreCards(value.cards)
+  return cards ? { kind: 'cards', id: value.id, createdAt: value.createdAt, cards } : null
+}
+
+function restoreRevealedSpread(value: unknown): RevealedSpread | null {
+  if (!isRecord(value) || !validId(value.id) || !validTime(value.drawnAt)
+    || typeof value.selectedIndex !== 'number' || !Number.isInteger(value.selectedIndex)
+    || value.selectedIndex < 0 || value.selectedIndex >= 5) return null
+  const cards = restoreCards(value.cards)
+  return cards ? { id: value.id, drawnAt: value.drawnAt, cards, selectedIndex: value.selectedIndex } : null
+}
+
+function spreadMatchesHistory(revealed: RevealedSpread, history: DrawResult[]): boolean {
+  const expected = resultFromSpread(revealed)
+  return history.some(entry => entry.id === expected.id && entry.itemId === expected.itemId
+    && entry.label === expected.label && entry.color === expected.color && entry.tier === expected.tier
+    && entry.probability === expected.probability && entry.drawnAt === expected.drawnAt)
+}
+
 function matchesLegacySeed(values: unknown[], seed: typeof LEGACY_LUNCH_ITEMS): boolean {
   return values.length === seed.length && values.every((value, index) => {
     const original = seed[index]
@@ -266,11 +393,18 @@ export function parseSavedState(raw: string | null): SavedState | null {
       ? [...new Set(parsed.excludedIds.filter((id): id is string => typeof id === 'string' && itemIds.has(id)))]
       : []
     const history = Array.isArray(parsed.history) ? restoreHistory(parsed.history) : []
-    const pending = restorePending(parsed.pending)
+    const candidate = isRecord(parsed.pending) && parsed.pending.kind === 'cards'
+      ? restorePendingSpread(parsed.pending)
+      : isRecord(parsed.pending) && parsed.pending.kind === undefined ? restorePending(parsed.pending) : null
+    const pending = candidate && !history.some(result => result.id === candidate.id) ? candidate : null
+    const revealed = pending ? null : restoreRevealedSpread(parsed.revealed)
     return {
       items, history, excludedIds,
       excludeWinners: parsed.excludeWinners === true, soundEnabled: parsed.soundEnabled === true,
-      pending: pending && !history.some(result => result.id === pending.id) ? pending : null,
+      pending,
+      ...(parsed.revealed === undefined ? {} : {
+        revealed: revealed && spreadMatchesHistory(revealed, history) ? revealed : null,
+      }),
     }
   } catch {
     return null

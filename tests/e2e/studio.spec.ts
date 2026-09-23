@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { DEFAULT_ITEMS } from '../../src/lib/draw'
+import { DEFAULT_ITEMS, type SavedState } from '../../src/lib/draw'
 
 const tierTabs = ['상 60%', '중 35%', '하 4.9%', '극하 0.1%'] as const
 const tierLabels = ['상', '중', '하', '극하'] as const
@@ -24,6 +24,10 @@ test.beforeEach(async ({ page }) => {
 
 async function waitForShared(page: Page) {
   await expect(page.locator('.save-status')).toContainText('공유됨')
+}
+
+async function personalState(page: Page): Promise<SavedState> {
+  return page.evaluate(() => JSON.parse(localStorage.getItem('bbob-studio-v1')!))
 }
 
 async function openStudio(page: Page) {
@@ -197,6 +201,8 @@ test('five pending cards lock editing, survive reload, and write history only af
   await page.reload()
   await expect(page.locator('.history-list li')).toHaveCount(1)
   await expect(page.locator('.tarot-choice:enabled')).toHaveCount(0)
+  await expect(page.locator('.result-card h3')).toHaveText('상 벌칙')
+  await expect(page.locator('.other-card')).toHaveCount(4)
 })
 
 for (const [index, sample] of [0.2, 0.75, 0.975, 0.9995].entries()) {
@@ -220,9 +226,9 @@ for (const [index, sample] of [0.2, 0.75, 0.975, 0.9995].entries()) {
   })
 }
 
-test('choosing a card uniformly selects from the already drawn tier', async ({ page }) => {
+test('each card preassigns a uniform candidate from its independently drawn tier', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
-  await fixedRandom(page, [0.2, 0.9])
+  await fixedRandom(page, Array.from({ length: 5 }, () => [0.2, 0.9]).flat())
   await openStudio(page)
   await seedAllTiers(page, ['첫 번째 상 벌칙', '두 번째 상 벌칙'])
   await page.getByRole('button', { name: '카드 뽑기', exact: true }).click()
@@ -231,6 +237,58 @@ test('choosing a card uniformly selects from the already drawn tier', async ({ p
   await page.getByRole('button', { name: '3번 카드 선택', exact: true }).click()
   await expect(page.locator('.result-card h3')).toHaveText('두 번째 상 벌칙')
   await expect(page.locator('.result-probability')).toContainText('30%')
+})
+
+test('five fixed card contents reveal by position, preserve the other four after reload, and exclude only the chosen card', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await fixedRandom(page, [0.2, 0, 0.2, 0.99, 0.75, 0.5, 0.975, 0.5, 0.9995, 0.5])
+  await openStudio(page)
+  await page.getByRole('switch', { name: '중복 제외', exact: true }).click()
+  await page.getByRole('button', { name: '카드 뽑기', exact: true }).click()
+  await expect(page.locator('.tarot-choice:enabled')).toHaveCount(5)
+  const pending = (await personalState(page)).pending
+  if (!pending || !('kind' in pending) || pending.kind !== 'cards') throw new Error('Expected a saved five-card deck')
+  expect(pending.cards.map(card => card.itemId)).toEqual(DEFAULT_ITEMS.map(item => item.id))
+  expect(pending.cards.map(card => card.tier)).toEqual(['high', 'high', 'medium', 'low', 'ultra'])
+  expect(pending.cards.map(card => card.probability)).toEqual([30, 30, 35, 4.9, 0.1])
+  await expect(page.locator('.other-cards, .result-card')).toHaveCount(0)
+  await expect(page.locator('.history-list li')).toHaveCount(0)
+
+  await page.reload()
+  await expect(page.locator('.tarot-choice:enabled')).toHaveCount(5)
+  expect((await personalState(page)).pending).toEqual(pending)
+  await page.getByRole('button', { name: '2번 카드 선택', exact: true }).click()
+  await expect(page.locator('.tarot-draw')).toHaveAttribute('data-phase', 'revealed')
+  await expect(page.locator('.result-card h3')).toHaveText(pending.cards[1].label)
+  await expect(page.locator('.other-cards')).toHaveAttribute('aria-label', '나머지 카드')
+  await expect(page.locator('.other-card')).toHaveCount(4)
+  for (const index of [0, 2, 3, 4]) {
+    const other = page.locator('.other-card[data-card-index="' + index + '"]')
+    await expect(other.locator('h4')).toHaveText(pending.cards[index].label)
+    await expect(other).toHaveAttribute('data-tier', pending.cards[index].tier)
+  }
+  await expect(page.locator('.other-cards button, .other-cards input')).toHaveCount(0)
+  const selected = await personalState(page)
+  expect(selected.pending).toBeNull()
+  expect(selected.history).toHaveLength(1)
+  expect(selected.history[0].itemId).toBe(pending.cards[1].itemId)
+  expect(selected.excludedIds).toEqual([pending.cards[1].itemId])
+  expect(selected.revealed?.cards).toEqual(pending.cards)
+  expect(selected.revealed?.selectedIndex).toBe(1)
+  expect(selected.revealed?.id).toBe(selected.history[0].id)
+  await page.screenshot({ path: 'outputs/browser/remaining-cards-varied-desktop.png', fullPage: true, animations: 'disabled' })
+
+  await page.reload()
+  await waitForShared(page)
+  expect((await personalState(page)).revealed).toEqual(selected.revealed)
+  await expect(page.locator('.result-card h3')).toHaveText(pending.cards[1].label)
+  await expect(page.locator('.other-card h4')).toHaveText([0, 2, 3, 4].map(index => pending.cards[index].label))
+  await expect(page.locator('.history-list li')).toHaveCount(1)
+  await page.getByRole('button', { name: '다시 뽑기', exact: true }).click()
+  await expect(page.locator('.other-cards, .result-card')).toHaveCount(0)
+  await expect(page.locator('.tarot-choice:enabled')).toHaveCount(5)
+  expect((await personalState(page)).revealed).toBeNull()
+  await expect(page.locator('.history-list li')).toHaveCount(1)
 })
 
 test('missing or exhausted tier blocks drawing without changing fixed odds; restore includes every tier', async ({ page }) => {
@@ -349,6 +407,34 @@ test('mobile tarot selection and a 60-character result remain usable', async ({ 
   const sizes = await page.evaluate(() => ({ inner: innerWidth, document: document.documentElement.scrollWidth }))
   expect(sizes.document).toBeLessThanOrEqual(sizes.inner)
   await page.screenshot({ path: 'outputs/browser/mobile-result-390.png', animations: 'disabled' })
+  for (const width of [320, 390, 768, 1440]) {
+    await page.setViewportSize({ width, height: width === 1440 ? 1100 : 844 })
+    await expect(page.locator('.other-card h4')).toHaveText([label, label, label, label])
+    await page.locator('.other-cards').scrollIntoViewIfNeeded()
+    const layout = await page.evaluate(() => {
+      const box = (selector: string) => {
+        const rect = document.querySelector(selector)!.getBoundingClientRect()
+        return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom }
+      }
+      return { panel: box('.draw-panel'), result: box('.result-card'), others: box('.other-cards'), action: box('.draw-action'), scrollWidth: document.documentElement.scrollWidth }
+    })
+    expect(layout.scrollWidth).toBeLessThanOrEqual(width)
+    expect(layout.others.left).toBeGreaterThanOrEqual(layout.panel.left)
+    expect(layout.others.right).toBeLessThanOrEqual(layout.panel.right)
+    expect(layout.others.top).toBeGreaterThanOrEqual(layout.result.bottom)
+    expect(layout.others.bottom <= layout.action.top || layout.others.top >= layout.action.bottom).toBe(true)
+    const boxes = await page.locator('.other-card').evaluateAll(cards => cards.map(card => {
+      const rect = card.getBoundingClientRect()
+      return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: card.clientWidth, scrollWidth: card.scrollWidth }
+    }))
+    for (const [index, box] of boxes.entries()) {
+      expect(box.scrollWidth).toBeLessThanOrEqual(box.width)
+      for (const other of boxes.slice(index + 1)) {
+        expect(box.right <= other.left || box.left >= other.right || box.bottom <= other.top || box.top >= other.bottom).toBe(true)
+      }
+    }
+    await page.screenshot({ path: 'outputs/browser/remaining-cards-' + width + '.png', fullPage: true, animations: 'disabled' })
+  }
 })
 
 test('normal-motion selection locks once and survives reload during the flip without another draw', async ({ page }) => {
@@ -369,9 +455,14 @@ test('normal-motion selection locks once and survives reload during the flip wit
   await waitForShared(page)
   await expect(page.locator('.history-list li')).toHaveCount(1)
   await expect(page.locator('.tarot-choice:enabled')).toHaveCount(0)
-  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('bbob-studio-v1')!).pending)).toBeNull()
+  const restored = await personalState(page)
+  expect(restored.pending).toBeNull()
+  expect(restored.revealed?.selectedIndex).toBe(4)
+  await expect(page.locator('.other-card')).toHaveCount(4)
+  await expect(page.locator('.result-card h3')).toHaveText(restored.history[0].label)
 
-  await page.getByRole('button', { name: '카드 뽑기', exact: true }).click()
+  await page.getByRole('button', { name: '다시 뽑기', exact: true }).click()
+  await expect(page.locator('.other-cards')).toHaveCount(0)
   await page.getByRole('button', { name: '1번 카드 선택', exact: true }).click()
   await expect(page.locator('.tarot-draw')).toHaveAttribute('data-phase', 'revealed')
   await expect(page.locator('.tarot-draw')).toHaveAttribute('data-selected-index', '0')
@@ -395,6 +486,8 @@ test('preset reset is explicit and reversible after custom choices and history s
   const presetLabels = await page.getByRole('textbox', { name: /항목 \d+ 이름/ }).evaluateAll(inputs => inputs.map(input => (input as HTMLInputElement).value))
   await seedAllTiers(page, ['내가 정한 벌칙'])
   await drawAndOpen(page)
+  const beforeReset = (await personalState(page)).revealed
+  expect(beforeReset?.cards).toHaveLength(5)
   await page.reload()
   await selectTier(page, 0)
   await expect(page.getByRole('textbox', { name: '항목 1 이름', exact: true })).toHaveValue('내가 정한 벌칙')
@@ -405,6 +498,7 @@ test('preset reset is explicit and reversible after custom choices and history s
   await selectTier(page, 0)
   await expect(page.locator('.item-row')).toHaveCount(presetLabels.length)
   await expect(page.locator('.history-list li')).toHaveCount(0)
+  await expect(page.locator('.result-card, .other-cards')).toHaveCount(0)
   for (const [index, label] of presetLabels.entries()) {
     await expect(page.getByRole('textbox', { name: '항목 ' + (index + 1) + ' 이름', exact: true })).toHaveValue(label)
   }
@@ -412,4 +506,13 @@ test('preset reset is explicit and reversible after custom choices and history s
   await expect(page.locator('.item-row')).toHaveCount(1)
   await expect(page.getByRole('textbox', { name: '항목 1 이름', exact: true })).toHaveValue('내가 정한 벌칙')
   await expect(page.locator('.history-list li')).toHaveCount(1)
+  await expect(page.locator('.result-card h3')).toHaveText('내가 정한 벌칙')
+  await expect(page.locator('.other-card h4')).toHaveText(Array(4).fill('내가 정한 벌칙'))
+  expect((await personalState(page)).revealed).toEqual(beforeReset)
+  await waitForShared(page)
+  await page.reload()
+  await expect(page.locator('.result-card h3')).toHaveText('내가 정한 벌칙')
+  await expect(page.locator('.other-card h4')).toHaveText(Array(4).fill('내가 정한 벌칙'))
+  await expect(page.locator('.history-list li')).toHaveCount(1)
+  expect((await personalState(page)).revealed).toEqual(beforeReset)
 })

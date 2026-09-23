@@ -6,7 +6,7 @@ import { Switch } from '@astryxdesign/core/Switch'
 import { TabList, Tab } from '@astryxdesign/core/TabList'
 import { Selector } from '@astryxdesign/core/Selector'
 import { ArrowRight, Check, ChevronDown, CircleHelp, Copy, History, ListPlus, Plus, RotateCcw, Shuffle, SlidersHorizontal, Sparkles, Trash2, Volume2, VolumeX, X } from 'lucide-react'
-import { DEFAULT_ITEMS, MAX_HISTORY, MAX_ITEMS, MAX_LABEL_LENGTH, TIERS, STORAGE_KEY, createPendingEgg as createPendingDraw, getEligibleItems, getMissingTiers, openEgg as revealPendingDraw, parseSavedState, probabilities, type DrawItem, type DrawResult, type SavedState, type TierId } from './lib/draw'
+import { DEFAULT_ITEMS, MAX_HISTORY, MAX_ITEMS, MAX_LABEL_LENGTH, TIERS, STORAGE_KEY, createPendingSpread, preparePendingSpread, chooseSpread, resultFromSpread, getEligibleItems, getMissingTiers, parseSavedState, probabilities, type DrawItem, type DrawResult, type SavedState, type TierId } from './lib/draw'
 import { useSharedBoard } from './hooks/useSharedBoard'
 import { mergeBoardItems } from './lib/sharedBoard'
 import { TarotDraw } from './components/TarotDraw'
@@ -29,9 +29,9 @@ function itemSignature(item: DrawItem) {
 function initialState(): SavedState {
   try {
     const saved = parseSavedState(localStorage.getItem(STORAGE_KEY))
-    if (saved) return saved
+    if (saved) return { ...saved, pending: preparePendingSpread(saved.pending) }
   } catch { /* The app remains usable when browser storage is unavailable. */ }
-  return { items: DEFAULT_ITEMS.map(item => ({ ...item })), history: [], excludeWinners: false, excludedIds: [], soundEnabled: false, pending: null }
+  return { items: DEFAULT_ITEMS.map(item => ({ ...item })), history: [], excludeWinners: false, excludedIds: [], soundEnabled: false, pending: null, revealed: null }
 }
 
 function Flower({ className = '' }: { className?: string }) {
@@ -71,8 +71,8 @@ function App() {
   }, [getSharedItems, setSharedItems])
   const [spinning, setSpinning] = useState(false)
   const [revealing, setRevealing] = useState(false)
-  const [selectedCard, setSelectedCard] = useState<number | null>(null)
-  const [result, setResult] = useState<DrawResult | null>(null)
+  const [selectedCard, setSelectedCard] = useState<number | null>(() => personal.revealed?.selectedIndex ?? null)
+  const [result, setResult] = useState<DrawResult | null>(() => personal.revealed ? resultFromSpread(personal.revealed) : null)
   const [activeTier, setActiveTier] = useState<TierId>('high')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [modal, setModal] = useState<Modal>(null)
@@ -159,7 +159,7 @@ function App() {
   const draw = useCallback(() => {
     if (drawingRef.current || revealing || state.pending || modal || !canDraw) return
     const exclusions = state.excludeWinners ? state.excludedIds : []
-    const pending = createPendingDraw(state.items, exclusions)
+    const pending = createPendingSpread(state.items, exclusions)
     if (!pending) return
     drawingRef.current = true
     openingRef.current = false
@@ -173,7 +173,7 @@ function App() {
     setResult(null)
     setSelectedCard(null)
     setSpinning(true)
-    setState(previous => ({ ...previous, pending }))
+    setState(previous => ({ ...previous, pending, revealed: null }))
     timerRef.current = setTimeout(() => {
       setSpinning(false)
       drawingRef.current = false
@@ -182,16 +182,17 @@ function App() {
   }, [state, reducedMotion, modal, canDraw, setState, revealing])
 
   function revealCard(index: number) {
-    if (spinning || openingRef.current || !state.pending) return
-    const selected = revealPendingDraw(state.pending)
-    if (!selected) return
+    if (spinning || openingRef.current || !state.pending || !('kind' in state.pending)) return
+    const chosen = chooseSpread(state.pending, index)
+    if (!chosen) return
+    const selected = chosen.result
     openingRef.current = true
     drawingRef.current = true
     setNotice(null)
     setSelectedCard(index)
     setRevealing(true)
     setResult(selected)
-    setState(previous => ({ ...previous, pending: null, history: [selected, ...previous.history.filter(entry => entry.id !== selected.id)].slice(0, MAX_HISTORY), excludedIds: previous.excludeWinners ? [...new Set([...previous.excludedIds, selected.itemId])] : previous.excludedIds }))
+    setState(previous => ({ ...previous, pending: null, revealed: chosen.revealed, history: [selected, ...previous.history.filter(entry => entry.id !== selected.id)].slice(0, MAX_HISTORY), excludedIds: previous.excludeWinners ? [...new Set([...previous.excludedIds, selected.itemId])] : previous.excludedIds }))
     if (state.soundEnabled) chime()
     timerRef.current = setTimeout(() => {
       setRevealing(false)
@@ -255,9 +256,23 @@ function App() {
 
   function resetRound() {
     if (locked) return
-    setState(previous => ({ ...previous, excludedIds: [] }))
+    setState(previous => ({ ...previous, excludedIds: [], revealed: null }))
     setResult(null)
     setNotice({ message: '전체 항목 포함' })
+  }
+
+  function clearHistory() {
+    if (locked || drawingRef.current) return
+    const history = [...state.history]
+    const revealed = state.revealed ?? null
+    setState(previous => ({ ...previous, history: [], revealed: null }))
+    setResult(null)
+    setSelectedCard(null)
+    setNotice({ message: '기록 비움', undo: () => {
+      setState(previous => ({ ...previous, history: [...previous.history, ...history].slice(0, MAX_HISTORY), revealed }))
+      setResult(revealed ? resultFromSpread(revealed) : null)
+      setSelectedCard(revealed?.selectedIndex ?? null)
+    } })
   }
 
   function resetItems(useDefaults: boolean) {
@@ -265,8 +280,9 @@ function App() {
     const beforeItems = getSharedItems()
     const beforeHistory = [...personalRef.current.history]
     const beforeExcludedIds = [...personalRef.current.excludedIds]
+    const beforeRevealed = personalRef.current.revealed ?? null
     const resetSnapshot = useDefaults ? DEFAULT_ITEMS.map(item => ({ ...item })) : []
-    setState(previous => ({ ...previous, items: resetSnapshot, history: [], excludedIds: [], pending: null }))
+    setState(previous => ({ ...previous, items: resetSnapshot, history: [], excludedIds: [], pending: null, revealed: null }))
     setActiveTier('high')
     setResult(null)
     setModal(null)
@@ -276,7 +292,9 @@ function App() {
         setNotice({ message: restored.reason === 'capacity' ? '30개를 넘어 되돌릴 수 없어요.' : '다른 수정과 겹쳐 되돌릴 수 없어요.' })
         return
       }
-      setState(previous => ({ ...previous, items: restored.items, history: beforeHistory, excludedIds: beforeExcludedIds }))
+      setState(previous => ({ ...previous, items: restored.items, history: beforeHistory, excludedIds: beforeExcludedIds, revealed: beforeRevealed }))
+      setResult(beforeRevealed ? resultFromSpread(beforeRevealed) : null)
+      setSelectedCard(beforeRevealed?.selectedIndex ?? null)
     } })
   }
 
@@ -341,6 +359,7 @@ function App() {
             <TarotDraw
               phase={spinning ? 'shuffling' : result ? revealing ? 'revealing' : 'revealed' : state.pending ? 'choosing' : 'idle'}
               result={result}
+              cards={result ? state.revealed?.cards ?? null : null}
               selectedIndex={selectedCard}
               onChoose={revealCard}
               onCopy={() => void copyResult()}
@@ -376,7 +395,7 @@ function App() {
           </section>
         </div>
 
-        <section className="history-section" aria-labelledby="history-title"><div className="history-heading"><Stack direction="horizontal" gap={2} vAlign="center"><History size={17} /><h2 id="history-title">기록</h2><span className="history-count">{state.history.length}</span></Stack><div className="history-controls">{state.history.length > 0 && <button className="text-button" aria-label="기록 비우기" disabled={locked} onClick={() => { const history = state.history; setState(previous => ({ ...previous, history: [] })); setNotice({ message: '기록 비움', undo: () => setState(previous => ({ ...previous, history: [...previous.history, ...history].slice(0, MAX_HISTORY) })) }) }}><Trash2 size={13} /> 비우기</button>}</div></div>
+        <section className="history-section" aria-labelledby="history-title"><div className="history-heading"><Stack direction="horizontal" gap={2} vAlign="center"><History size={17} /><h2 id="history-title">기록</h2><span className="history-count">{state.history.length}</span></Stack><div className="history-controls">{state.history.length > 0 && <button className="text-button" aria-label="기록 비우기" disabled={locked} onClick={clearHistory}><Trash2 size={13} /> 비우기</button>}</div></div>
           {state.history.length ? <><ol className="history-list">{(showAllHistory ? state.history : state.history.slice(0, 5)).map(entry => <li key={entry.id}><span className="history-item-dot" style={{ backgroundColor: entry.color }} /><div><strong>{entry.label}</strong><span>{new Date(entry.drawnAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })} · {percentage(entry.probability)}</span></div></li>)}</ol>{state.history.length > 5 && <button className="history-expand text-button" onClick={() => setShowAllHistory(!showAllHistory)}>{showAllHistory ? '접기' : `전체 ${state.history.length}개`}<ChevronDown size={14} style={{ transform: showAllHistory ? 'rotate(180deg)' : undefined }} /></button>}</> : <div className="empty-history"><p>아직 기록이 없어요.</p></div>}
         </section>
       </main>
@@ -387,7 +406,7 @@ function App() {
 
       <dialog className="app-dialog" ref={dialogRef} onCancel={() => setModal(null)} onClose={() => setModal(null)} onClick={event => { if (event.target === event.currentTarget) { const rect = event.currentTarget.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) setModal(null) } }} aria-labelledby="dialog-title">
         <button className="dialog-close icon-button" onClick={() => setModal(null)} aria-label="창 닫기"><X size={20} /></button>
-        {modal === 'help' && <><h2 id="dialog-title">이용 방법</h2><ul className="help-summary"><li>링크를 가진 누구나 목록을 편집할 수 있어요.</li><li>상 60% · 중 35% · 하 4.9% · 극하 0.1%</li><li>카드를 펼치고, 한 장을 골라주세요.</li><li>같은 등급의 벌칙은 동일 확률로 나와요.</li><li>네 등급마다 추첨 가능한 항목이 필요해요.</li><li>‘중복 제외’로 비워진 등급은 ‘전체 포함’으로 복원하세요.</li></ul><p className="privacy-note">목록은 모두 공유 · 카드와 기록은 내 브라우저에 저장됩니다.</p>{hasLocalImport && <button className="import-local text-button" disabled={editorLocked} onClick={importLocalItems}>이 기기의 목록 가져오기</button>}<Button label="닫기" variant="primary" width="100%" onClick={() => setModal(null)} /></>}
+        {modal === 'help' && <><h2 id="dialog-title">이용 방법</h2><ul className="help-summary"><li>링크를 가진 누구나 목록을 편집할 수 있어요.</li><li>상 60% · 중 35% · 하 4.9% · 극하 0.1%</li><li>카드를 펼치고, 한 장을 골라주세요.</li><li>같은 등급의 벌칙은 동일 확률로 나와요.</li><li>같은 벌칙이 여러 카드에 나올 수 있어요.</li><li>네 등급마다 추첨 가능한 항목이 필요해요.</li><li>‘중복 제외’로 비워진 등급은 ‘전체 포함’으로 복원하세요.</li></ul><p className="privacy-note">목록은 모두 공유 · 카드와 기록은 내 브라우저에 저장됩니다.</p>{hasLocalImport && <button className="import-local text-button" disabled={editorLocked} onClick={importLocalItems}>이 기기의 목록 가져오기</button>}<Button label="닫기" variant="primary" width="100%" onClick={() => setModal(null)} /></>}
         {modal === 'bulk' && <form onSubmit={addBulk}><h2 id="dialog-title">한 번에 추가</h2><p className="dialog-description">{tier.label} 등급 · 한 줄에 하나씩.</p><label className="bulk-label" htmlFor="bulk-items">추가할 항목 <span>{MAX_ITEMS - state.items.length}개까지</span></label><textarea id="bulk-items" value={bulkText} onChange={event => setBulkText(event.target.value)} placeholder={'청소 20분\n설거지 전담\n친구에게 커피 사기'} rows={7} maxLength={MAX_ITEMS * (MAX_LABEL_LENGTH + 2)} aria-describedby={bulkError ? 'bulk-error' : undefined} aria-invalid={!!bulkError} />{bulkError && <p className="form-error" id="bulk-error" role="alert">{bulkError}</p>}<Button label="추가하기" type="submit" variant="primary" width="100%" icon={<Plus size={17} />} /></form>}
         {modal === 'new' && <><h2 id="dialog-title">목록 초기화</h2><p className="dialog-description">모두의 목록이 바뀝니다. 내 기록도 초기화됩니다.</p><Stack direction="horizontal" gap={2}><Button label="비우기" width="100%" onClick={() => resetItems(false)} /><Button label="기본 벌칙" variant="primary" width="100%" onClick={() => resetItems(true)} /></Stack></>}
       </dialog>

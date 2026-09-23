@@ -1,11 +1,12 @@
 import type { CSSProperties, RefObject } from 'react'
 import { Copy } from 'lucide-react'
-import { TIERS, type DrawResult } from '../lib/draw'
+import { TIERS, type DrawCard, type DrawResult } from '../lib/draw'
 import './tarot.css'
 
 export type TarotDrawProps = {
   phase: 'idle' | 'shuffling' | 'choosing' | 'revealing' | 'revealed'
   result: DrawResult | null
+  cards: DrawCard[] | null
   selectedIndex: number | null
   onChoose: (index: number) => void
   onCopy: () => void
@@ -47,9 +48,12 @@ function formatProbability(value: number) {
   return `${Number(value.toFixed(1))}%`
 }
 
-export function TarotDraw({ phase, result, selectedIndex, onChoose, onCopy, cardRef, resultRef }: TarotDrawProps) {
-  const hasSelection = (phase === 'revealing' || phase === 'revealed') && result !== null && selectedIndex !== null
+export function TarotDraw({ phase, result, cards, selectedIndex, onChoose, onCopy, cardRef, resultRef }: TarotDrawProps) {
+  const hasSelection = (phase === 'revealing' || phase === 'revealed') && result !== null && selectedIndex !== null && selectedIndex >= 0 && selectedIndex < 5
   const resultTier = TIERS.find(tier => tier.id === result?.tier)
+  const otherCards = phase === 'revealed' && hasSelection && cards?.length === 5
+    ? cards.map((card, index) => ({ card, index })).filter(({ index }) => index !== selectedIndex)
+    : []
 
   return <div className={`tarot-draw phase-${phase}`} data-phase={phase} data-selected-index={hasSelection ? selectedIndex : undefined}>
     <div className="tarot-atmosphere" aria-hidden="true"><span className="tarot-orbit" /><span className="tarot-orbit tarot-orbit-inner" /><Star className="tarot-star tarot-star-one" /><Star className="tarot-star tarot-star-two" /><span className="tarot-dust tarot-dust-one" /><span className="tarot-dust tarot-dust-two" /></div>
@@ -79,7 +83,7 @@ export function TarotDraw({ phase, result, selectedIndex, onChoose, onCopy, card
               aria-hidden={phase !== 'revealed'}
             >
               <div className="tarot-front-ornament" aria-hidden="true"><span /><Star /><span /></div>
-              <span className="result-eyebrow">{resultTier?.label ?? '결과'}</span>
+              <span className="result-eyebrow"><span className="tarot-selected-badge">선택</span><span>{resultTier?.label ?? '결과'}</span></span>
               <h3 ref={resultRef} tabIndex={-1}>{result.label}</h3>
               <div className="tarot-result-footer"><span className="result-probability" aria-label={`당첨 확률 ${formatProbability(result.probability)}`}>{formatProbability(result.probability)}</span><button type="button" className="copy-result" aria-label="뽑기 결과 복사" title="결과 복사" tabIndex={phase === 'revealed' ? 0 : -1} onClick={onCopy}><Copy size={15} /></button></div>
             </article>}
@@ -88,6 +92,22 @@ export function TarotDraw({ phase, result, selectedIndex, onChoose, onCopy, card
       })}
     </div>
     <span className="tarot-ground" aria-hidden="true" />
+    {otherCards.length > 0 && <section className="other-cards" aria-label="나머지 카드">
+      <p className="other-cards-heading">다른 카드</p>
+      <div className="other-cards-grid">
+        {otherCards.map(({ card, index }, order) => <article
+          key={index}
+          className={`other-card tier-${card.tier}`}
+          data-card-index={index}
+          data-tier={card.tier}
+          style={{ '--other-order': order } as CSSProperties}
+        >
+          <div className="other-card-heading"><span className="other-card-position">{index + 1}번</span><span className="other-card-tier">{TIERS.find(tier => tier.id === card.tier)?.label}</span></div>
+          <h4>{card.label}</h4>
+          <Star className="other-card-mark" />
+        </article>)}
+      </div>
+    </section>}
   </div>
 }
 

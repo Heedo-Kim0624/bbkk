@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_ITEMS, MAX_HISTORY, MAX_ITEMS, MAX_LABEL_LENGTH, PALETTE, STORAGE_KEY, TIERS,
-  createPendingEgg, getEligibleItems, getMissingTiers, openEgg, parseSavedState,
-  pickTier, probabilities, type DrawItem, type DrawResult, type PendingEgg, type SavedState, type TierId,
+  chooseSpread, createPendingEgg, createPendingSpread, getEligibleItems, getMissingTiers, openEgg, parseSavedState,
+  pickTier, preparePendingSpread, probabilities, resultFromSpread,
+  type DrawItem, type DrawResult, type PendingEgg, type PendingSpread, type SavedState, type TierId,
 } from './draw'
 
 const item = (id: string, tier: TierId = 'high', label = id): DrawItem => ({
@@ -158,13 +159,13 @@ describe('saved state and pending restoration', () => {
     const state = { ...saved(), pending: pending(), history: [result('older')], excludeWinners: true, soundEnabled: true }
     expect(restore(state)).toEqual(state)
     expect(restore(state)?.history).toHaveLength(1)
-    expect(openEgg(restore(state)!.pending!, () => 0.5)?.itemId).toBe('second')
+    expect(openEgg(restore(state)!.pending as PendingEgg, () => 0.5)?.itemId).toBe('second')
   })
 
   it('keeps pending snapshots after their source choices change or are removed', () => {
     const state = { ...saved([]), pending: pending('ultra') }
     expect(restore(state)?.pending).toEqual(state.pending)
-    expect(openEgg(restore(state)!.pending!, () => 0)?.probability).toBe(0.05)
+    expect(openEgg(restore(state)!.pending as PendingEgg, () => 0)?.probability).toBe(0.05)
   })
 
   it('does not restore an egg already represented in history', () => {
@@ -210,6 +211,169 @@ describe('saved state and pending restoration', () => {
   it('retains legacy history without a tier and preserves valid new history tiers', () => {
     const entries = [result('old'), { ...result('new'), tier: 'ultra' }]
     expect(restore({ items: [], history: entries })?.history).toEqual(entries)
+  })
+})
+
+describe('five preassigned cards', () => {
+  function mixedSpread(): PendingSpread {
+    const samples = [0, 0, 0.6, 0, 0.95, 0, 0.999, 0, 0, 0.75]
+    return createPendingSpread(DEFAULT_ITEMS, [], () => samples.shift()!)!
+  }
+
+  it('assigns every position before selection using a separate tier and item sample', () => {
+    const samples = [0, 0, 0.6, 0, 0.95, 0, 0.999, 0, 0, 0.75]
+    const rng = vi.fn(() => samples.shift()!)
+    const spread = createPendingSpread(DEFAULT_ITEMS, [], rng)!
+    expect(rng).toHaveBeenCalledTimes(10)
+    expect(spread.kind).toBe('cards')
+    expect(spread.cards.map(card => card.itemId)).toEqual(['penalty-1', 'penalty-3', 'penalty-4', 'penalty-5', 'penalty-2'])
+    expect(spread.cards.map(card => card.tier)).toEqual(['high', 'medium', 'low', 'ultra', 'high'])
+    expect(spread.cards.map(card => card.probability)).toEqual([30, 35, 4.9, 0.1, 30])
+  })
+
+  it('preserves the fixed 6000/3500/490/10 distribution at every card position', () => {
+    const counts = Array.from({ length: 5 }, () => ({ high: 0, medium: 0, low: 0, ultra: 0 }))
+    for (let slot = 0; slot < 10_000; slot += 1) {
+      let call = 0
+      const spread = createPendingSpread(DEFAULT_ITEMS, [], () => call++ % 2 === 0 ? (slot + 0.5) / 10_000 : 0.5)!
+      spread.cards.forEach((card, index) => { counts[index][card.tier] += 1 })
+    }
+    for (const count of counts) expect(count).toEqual({ high: 6000, medium: 3500, low: 490, ultra: 10 })
+  })
+
+  it('samples with replacement while preserving round-start exclusions', () => {
+    const spread = createPendingSpread(DEFAULT_ITEMS, ['penalty-1'], () => 0)!
+    expect(spread.cards).toHaveLength(5)
+    expect(spread.cards.every(card => card.itemId === 'penalty-2' && card.probability === 60)).toBe(true)
+    expect(spread.cards[0]).not.toBe(spread.cards[1])
+  })
+
+  it('rejects missing tiers, duplicate eligible IDs and oversized pools before consuming randomness', () => {
+    const rng = vi.fn(() => 0)
+    expect(createPendingSpread(DEFAULT_ITEMS, ['penalty-5'], rng)).toBeNull()
+    expect(createPendingSpread([...DEFAULT_ITEMS, { ...DEFAULT_ITEMS[0] }], [], rng)).toBeNull()
+    const many = [...DEFAULT_ITEMS, ...Array.from({ length: 26 }, (_, index) => item(`extra-${index}`))]
+    expect(createPendingSpread(many, [], rng)).toBeNull()
+    expect(rng).not.toHaveBeenCalled()
+  })
+
+  it('rejects invalid tier and item samples without producing a partly assigned deck', () => {
+    expect(() => createPendingSpread(DEFAULT_ITEMS, [], () => Number.NaN)).toThrow(RangeError)
+    let call = 0
+    expect(() => createPendingSpread(DEFAULT_ITEMS, [], () => call++ === 0 ? 0 : 1)).toThrow(RangeError)
+  })
+
+  it('chooses the saved position without drawing any new randomness and restores its result exactly', () => {
+    const spread = mixedSpread()
+    const original = structuredClone(spread)
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000)
+    const rng = vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation(() => {
+      throw new Error('Selection must not draw again')
+    })
+    const selected = chooseSpread(spread, 3)!
+    expect(selected.result).toEqual({ id: spread.id, ...spread.cards[3], drawnAt: 1_800_000_000_000 })
+    expect(selected.revealed).toEqual({ id: spread.id, cards: spread.cards, drawnAt: 1_800_000_000_000, selectedIndex: 3 })
+    expect(resultFromSpread(selected.revealed)).toEqual(selected.result)
+    expect(rng).not.toHaveBeenCalled()
+    expect(spread).toEqual(original)
+    selected.revealed.cards[0].label = '독립 복사'
+    expect(spread.cards[0].label).toBe(original.cards[0].label)
+  })
+
+  it.each([-1, 5, 0.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid selected index %s', index => {
+    expect(chooseSpread(mixedSpread(), index)).toBeNull()
+  })
+
+  it('round-trips all five pending cards and never regenerates their contents on preparation', () => {
+    const spread = mixedSpread()
+    const state = { ...saved(), pending: spread }
+    const restored = restore(state)!
+    expect(restored).toEqual(state)
+    const rng = vi.fn(() => 0.999)
+    const prepared = preparePendingSpread(restored.pending, rng)!
+    expect(prepared).toEqual(spread)
+    expect(prepared).not.toBe(restored.pending)
+    expect(prepared.cards).not.toBe(spread.cards)
+    expect(rng).not.toHaveBeenCalled()
+  })
+
+  it('restores the complete revealed spread only alongside its one selected history entry', () => {
+    const selected = chooseSpread(mixedSpread(), 4)!
+    const state = { ...saved([]), revealed: selected.revealed, history: [selected.result, result('older')] }
+    expect(restore(state)).toEqual(state)
+    expect(resultFromSpread(restore(state)!.revealed!)).toEqual(selected.result)
+    expect(restore({ ...state, history: [] })?.revealed).toBeNull()
+    expect(restore({ ...saved(), revealed: null })).toEqual({ ...saved(), revealed: null })
+  })
+
+  it.each<Partial<DrawResult>>([
+    { id: 'different-round' }, { itemId: 'other-item' }, { label: '다른 내용' },
+    { color: '#123456' }, { tier: 'medium' }, { probability: 31 }, { drawnAt: 1 },
+  ])('rejects a revealed spread whose selected history entry differs: %o', change => {
+    const selected = chooseSpread(mixedSpread(), 0)!
+    const history = [{ ...selected.result, ...change }]
+    const restored = restore({ ...saved(), revealed: selected.revealed, history })!
+    expect(restored.revealed).toBeNull()
+    expect(restored.history).toEqual(history)
+  })
+
+  it('rejects malformed pending cards without dropping other personal data', () => {
+    const spread = mixedSpread()
+    const badCards = [
+      { ...spread.cards[0], itemId: '' }, { ...spread.cards[0], label: ' ' },
+      { ...spread.cards[0], label: '가'.repeat(61) }, { ...spread.cards[0], color: 'url(invalid)' },
+      { ...spread.cards[0], tier: 'unknown' }, { ...spread.cards[0], probability: 0 },
+      { ...spread.cards[0], probability: 101 }, { ...spread.cards[0], probability: Number.NaN },
+    ]
+    const malformed = [
+      { ...spread, id: '' }, { ...spread, createdAt: -1 }, { ...spread, cards: spread.cards.slice(0, 4) },
+      { ...spread, cards: [...spread.cards, spread.cards[0]] },
+      ...badCards.map(card => ({ ...spread, cards: [card, ...spread.cards.slice(1)] })),
+    ]
+    for (const pending of malformed) {
+      const restored = restore({ ...saved(), pending, history: [result('older')] })!
+      expect(restored.pending).toBeNull()
+      expect(restored.history).toEqual([result('older')])
+      expect(preparePendingSpread(pending as PendingSpread)).toBeNull()
+      expect(chooseSpread(pending as PendingSpread, 0)).toBeNull()
+    }
+  })
+
+  it('drops corrupted revealed metadata while retaining the valid chosen history', () => {
+    const selected = chooseSpread(mixedSpread(), 2)!
+    for (const revealed of [
+      { ...selected.revealed, selectedIndex: 5 }, { ...selected.revealed, selectedIndex: 0.5 },
+      { ...selected.revealed, cards: selected.revealed.cards.slice(0, 4) },
+      { ...selected.revealed, drawnAt: -1 },
+    ]) {
+      const restored = restore({ ...saved(), revealed, history: [selected.result] })!
+      expect(restored.revealed).toBeNull()
+      expect(restored.history).toEqual([selected.result])
+    }
+  })
+
+  it('prefers an unfinished spread over a previous revealed round and rejects an already completed pending ID', () => {
+    const old = chooseSpread(mixedSpread(), 1)!
+    const next = mixedSpread()
+    const state = { ...saved(), pending: next, revealed: old.revealed, history: [old.result] }
+    expect(restore(state)?.pending).toEqual(next)
+    expect(restore(state)?.revealed).toBeNull()
+    const completed = { ...next, id: old.result.id }
+    expect(restore({ ...state, pending: completed })?.pending).toBeNull()
+    expect(restore({ ...state, pending: completed })?.revealed).toEqual(old.revealed)
+  })
+
+  it('migrates a legacy egg using its original tier, candidates, round ID and creation time', () => {
+    const egg = pending('ultra')
+    const samples = [0, 0.5, 0.99, 0.49, 0]
+    const rng = vi.fn(() => samples.shift()!)
+    const spread = preparePendingSpread(egg, rng)!
+    expect(rng).toHaveBeenCalledTimes(5)
+    expect(spread.id).toBe(egg.id)
+    expect(spread.createdAt).toBe(egg.createdAt)
+    expect(spread.cards.map(card => card.itemId)).toEqual(['first', 'second', 'second', 'first', 'first'])
+    expect(spread.cards.every(card => card.tier === 'ultra' && card.probability === 0.05)).toBe(true)
+    expect(preparePendingSpread(null)).toBeNull()
   })
 })
 
