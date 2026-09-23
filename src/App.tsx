@@ -6,9 +6,10 @@ import { Switch } from '@astryxdesign/core/Switch'
 import { TabList, Tab } from '@astryxdesign/core/TabList'
 import { Selector } from '@astryxdesign/core/Selector'
 import { ArrowRight, Check, ChevronDown, CircleHelp, Copy, History, ListPlus, Plus, RotateCcw, Shuffle, SlidersHorizontal, Sparkles, Trash2, Volume2, VolumeX, X } from 'lucide-react'
-import { DEFAULT_ITEMS, MAX_HISTORY, MAX_ITEMS, MAX_LABEL_LENGTH, TIERS, STORAGE_KEY, createPendingEgg, getEligibleItems, getMissingTiers, openEgg, parseSavedState, probabilities, type DrawItem, type DrawResult, type SavedState, type TierId } from './lib/draw'
+import { DEFAULT_ITEMS, MAX_HISTORY, MAX_ITEMS, MAX_LABEL_LENGTH, TIERS, STORAGE_KEY, createPendingEgg as createPendingDraw, getEligibleItems, getMissingTiers, openEgg as revealPendingDraw, parseSavedState, probabilities, type DrawItem, type DrawResult, type SavedState, type TierId } from './lib/draw'
 import { useSharedBoard } from './hooks/useSharedBoard'
 import { mergeBoardItems } from './lib/sharedBoard'
+import { TarotDraw } from './components/TarotDraw'
 
 type Notice = { message: string; undo?: () => void }
 type Modal = 'help' | 'bulk' | 'new' | null
@@ -69,6 +70,8 @@ function App() {
     setPersonal(next)
   }, [getSharedItems, setSharedItems])
   const [spinning, setSpinning] = useState(false)
+  const [revealing, setRevealing] = useState(false)
+  const [selectedCard, setSelectedCard] = useState<number | null>(null)
   const [result, setResult] = useState<DrawResult | null>(null)
   const [activeTier, setActiveTier] = useState<TierId>('high')
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -83,20 +86,18 @@ function App() {
   const audioRef = useRef<AudioContext | null>(null)
   const dialogRef = useRef<HTMLDialogElement>(null)
   const editorRef = useRef<HTMLElement>(null)
-  const eggRef = useRef<HTMLButtonElement>(null)
+  const cardRef = useRef<HTMLButtonElement>(null)
   const resultRef = useRef<HTMLHeadingElement>(null)
   const reducedMotion = useReducedMotion()
   const excluded = state.excludeWinners ? state.excludedIds : []
-  const eligible = getEligibleItems(state.items, excluded)
   const odds = probabilities(state.items, excluded)
   const missingTiers = getMissingTiers(state.items, excluded)
-  const locked = spinning || state.pending !== null
+  const locked = spinning || revealing || state.pending !== null
   const editorLocked = locked || !shared.ready
   const canDraw = shared.ready && shared.status === 'synced'
   const tier = TIERS.find(tier => tier.id === activeTier)!
   const visibleItems = state.items.filter(item => item.tier === activeTier)
   const hasBlank = visibleItems.some(item => !item.label.trim())
-  const pendingTier = TIERS.find(tier => tier.id === state.pending?.tier)
   const missingLabels = TIERS.filter(tier => missingTiers.includes(tier.id)).map(tier => tier.label).join('·')
   const shareStatus = { loading: '연결 중', synced: '공유됨', saving: '저장 중', offline: '연결 끊김', conflict: '수정 충돌' }[shared.status]
   const hasLocalImport = localItems.some(item => item.label.trim() && !DEFAULT_ITEMS.some(defaultItem => itemSignature(defaultItem) === itemSignature(item)))
@@ -129,12 +130,12 @@ function App() {
   }, [modal])
 
   useEffect(() => {
-    if (!spinning && state.pending) eggRef.current?.focus({ preventScroll: true })
+    if (!spinning && state.pending) cardRef.current?.focus({ preventScroll: true })
   }, [spinning, state.pending])
 
   useEffect(() => {
-    if (result) resultRef.current?.focus({ preventScroll: true })
-  }, [result])
+    if (result && !revealing) resultRef.current?.focus({ preventScroll: true })
+  }, [result, revealing])
 
   const chime = useCallback(() => {
     const context = audioRef.current
@@ -156,9 +157,9 @@ function App() {
   }, [])
 
   const draw = useCallback(() => {
-    if (drawingRef.current || state.pending || modal || !canDraw) return
+    if (drawingRef.current || revealing || state.pending || modal || !canDraw) return
     const exclusions = state.excludeWinners ? state.excludedIds : []
-    const pending = createPendingEgg(state.items, exclusions)
+    const pending = createPendingDraw(state.items, exclusions)
     if (!pending) return
     drawingRef.current = true
     openingRef.current = false
@@ -170,24 +171,33 @@ function App() {
       } catch { /* Sound is optional and must never prevent a draw. */ }
     }
     setResult(null)
+    setSelectedCard(null)
     setSpinning(true)
     setState(previous => ({ ...previous, pending }))
     timerRef.current = setTimeout(() => {
       setSpinning(false)
       drawingRef.current = false
       timerRef.current = null
-    }, reducedMotion ? 180 : 1500)
-  }, [state, reducedMotion, modal, canDraw, setState])
+    }, reducedMotion ? 180 : 1100)
+  }, [state, reducedMotion, modal, canDraw, setState, revealing])
 
-  function revealEgg() {
+  function revealCard(index: number) {
     if (spinning || openingRef.current || !state.pending) return
-    const selected = openEgg(state.pending)
+    const selected = revealPendingDraw(state.pending)
     if (!selected) return
     openingRef.current = true
+    drawingRef.current = true
     setNotice(null)
+    setSelectedCard(index)
+    setRevealing(true)
     setResult(selected)
     setState(previous => ({ ...previous, pending: null, history: [selected, ...previous.history.filter(entry => entry.id !== selected.id)].slice(0, MAX_HISTORY), excludedIds: previous.excludeWinners ? [...new Set([...previous.excludedIds, selected.itemId])] : previous.excludedIds }))
     if (state.soundEnabled) chime()
+    timerRef.current = setTimeout(() => {
+      setRevealing(false)
+      drawingRef.current = false
+      timerRef.current = null
+    }, reducedMotion ? 120 : 900)
   }
 
   useEffect(() => {
@@ -324,35 +334,24 @@ function App() {
         {(shared.status === 'offline' || shared.status === 'conflict') && <div className="sync-notice" role="status"><span>{shared.status === 'conflict' ? shared.error ?? '수정이 겹쳤어요. 적용할 목록을 선택하세요.' : '공유 연결이 끊겨 저장 상태를 확인할 수 없어요.'}</span><div>{shared.status === 'conflict' ? <><button className="text-button" title="내 수정 대신 최신 공유 목록 불러오기" onClick={shared.reload}>최신 목록</button><button className="text-button" onClick={shared.retry}>내 수정 적용</button></> : <button className="text-button" onClick={shared.retry}>다시 연결</button>}</div></div>}
 
         <div className="studio-grid" id="draw-studio">
-          <section className={`draw-panel glass-panel ${spinning ? 'is-spinning' : ''} ${result ? 'has-result' : ''} ${state.pending && !spinning ? 'has-egg' : ''}`} aria-labelledby="draw-title">
+          <section className={`draw-panel glass-panel ${spinning ? 'is-spinning' : ''} ${result ? 'has-result' : ''} ${state.pending && !spinning ? 'has-cards' : ''}`} aria-labelledby="draw-title">
             <div className="panel-topline"><Sparkles className="section-spark" size={17} aria-hidden="true" /><button className={`icon-button sound-button ${state.soundEnabled ? 'is-active' : ''}`} aria-label={state.soundEnabled ? '효과음 끄기' : '효과음 켜기'} aria-pressed={state.soundEnabled} title={state.soundEnabled ? '효과음 끄기' : '효과음 켜기'} disabled={locked} onClick={() => setState(previous => ({ ...previous, soundEnabled: !previous.soundEnabled }))}>{state.soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}</button></div>
-            <div className="draw-heading"><h2 id="draw-title">{spinning ? '뽑는 중…' : pendingTier ? `${pendingTier.label} · ${pendingTier.probability}%` : '오늘의 벌칙'}</h2></div>
+            <div className="draw-heading"><h2 id="draw-title">{spinning ? '카드를 섞는 중…' : state.pending ? '한 장을 골라주세요' : '오늘의 벌칙'}</h2></div>
 
-            <div className="lottery-scene" aria-hidden="true" onPointerMove={event => {
-              if (reducedMotion || event.pointerType !== 'mouse') return
-              const rect = event.currentTarget.getBoundingClientRect()
-              event.currentTarget.style.setProperty('--pointer-x', `${((event.clientX - rect.left) / rect.width - 0.5) * 10}px`)
-              event.currentTarget.style.setProperty('--pointer-y', `${((event.clientY - rect.top) / rect.height - 0.5) * 8}px`)
-            }} onPointerLeave={event => { event.currentTarget.style.setProperty('--pointer-x', '0px'); event.currentTarget.style.setProperty('--pointer-y', '0px') }}>
-              <div className="scene-halo" /><div className="orbit orbit-one" /><div className="orbit orbit-two" />
-              <span className="scene-spark spark-one">✦</span><span className="scene-spark spark-two">✧</span><span className="scene-dot dot-one" /><span className="scene-dot dot-two" />
-              <div className="globe-shadow" />
-              <div className="glass-globe"><div className="globe-shine" /><div className="globe-ring" />
-                <div className="lottery-balls">{TIERS.map((tier, index) => <div className={`lottery-ball ball-${index} mini-egg tier-${tier.id}`} key={tier.id} style={{ '--ball-color': tier.color, '--ball-delay': `${index * -0.38}s` } as CSSProperties}><span>{tier.label}</span><Flower /></div>)}</div>
-                {eligible.length === 0 && <Flower className="empty-globe-flower" />}
-                <div className="globe-front" />
-              </div>
-              <div className="globe-base"><Flower /></div>
-              {result && <div className="confetti">{Array.from({ length: 16 }, (_, index) => <i key={`${result.id}-${index}`} style={{ '--i': index, '--confetti-color': result.color } as CSSProperties} />)}</div>}
-            </div>
-
-            {state.pending && pendingTier && !spinning && <div className={`egg-reveal tier-${pendingTier.id}`}><button ref={eggRef} className="prize-egg" data-tier={pendingTier.id} aria-label={`${pendingTier.label} 알 열기`} aria-describedby="egg-hint" onClick={revealEgg}><span className="egg-aura" aria-hidden="true" /><span className="egg-shell" aria-hidden="true"><span className="egg-sheen" /><span className="egg-seam" /><Flower /></span><span className="egg-sparkles" aria-hidden="true">✧<span>✦</span>✧</span></button><p className="egg-caption" id="egg-hint">알을 눌러 열기</p></div>}
-            {result && <div className={`result-card tier-${result.tier ?? 'high'} ${result.label.length > 24 ? 'long-result' : ''}`} key={result.id}><span className="result-eyebrow"><Sparkles size={13} /> {TIERS.find(tier => tier.id === result.tier)?.label ?? '결과'}</span><h3 ref={resultRef} tabIndex={-1}>{result.label}</h3><span className="result-probability" aria-label={`당첨 확률 ${percentage(result.probability)}`}>{percentage(result.probability)}</span><button className="copy-result" onClick={() => void copyResult()} aria-label="뽑기 결과 복사" title="결과 복사"><Copy size={15} /></button></div>}
+            <TarotDraw
+              phase={spinning ? 'shuffling' : result ? revealing ? 'revealing' : 'revealed' : state.pending ? 'choosing' : 'idle'}
+              result={result}
+              selectedIndex={selectedCard}
+              onChoose={revealCard}
+              onCopy={() => void copyResult()}
+              cardRef={cardRef}
+              resultRef={resultRef}
+            />
             <div className="draw-bottom">
-              <div className="draw-action"><Button label={spinning ? '뽑는 중…' : state.pending ? '알을 열어주세요' : result ? '다시 뽑기' : '알 뽑기'} variant="primary" size="lg" width="100%" isDisabled={locked || !canDraw || missingTiers.length > 0} icon={<Shuffle size={20} />} onClick={draw} /><ArrowRight className="draw-arrow" size={18} /></div>
+              <div className="draw-action"><Button label={spinning ? '섞는 중…' : revealing ? '뒤집는 중…' : state.pending ? '카드를 선택하세요' : result ? '다시 뽑기' : '카드 뽑기'} variant="primary" size="lg" width="100%" isDisabled={locked || !canDraw || missingTiers.length > 0} icon={<Shuffle size={20} />} onClick={draw} /><ArrowRight className="draw-arrow" size={18} /></div>
               <p className="draw-hint">{locked ? '\u00a0' : !canDraw ? (shared.status === 'saving' ? '목록을 저장하고 있어요.' : '공유 목록을 확인하고 있어요.') : missingTiers.length ? `${missingLabels} 등급에 항목이 필요해요.` : <span className="desktop-shortcut"><kbd title="Space 키로 뽑기">Space</kbd></span>}</p>
             </div>
-            <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{spinning ? '알을 뽑는 중입니다.' : pendingTier ? `${pendingTier.label} 등급, ${pendingTier.eggLabel} 알입니다. 알을 눌러 벌칙을 확인하세요.` : result ? `뽑기 결과: ${result.label}. 당첨 확률 ${percentage(result.probability)}.` : ''}</p>
+            <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{spinning ? '카드를 섞는 중입니다.' : state.pending ? '펼쳐진 카드 중 한 장을 선택하세요.' : result && !revealing ? `뽑기 결과: ${result.label}. 당첨 확률 ${percentage(result.probability)}.` : ''}</p>
           </section>
 
           <section className="editor-panel glass-panel" ref={editorRef} aria-labelledby="editor-title">
@@ -388,7 +387,7 @@ function App() {
 
       <dialog className="app-dialog" ref={dialogRef} onCancel={() => setModal(null)} onClose={() => setModal(null)} onClick={event => { if (event.target === event.currentTarget) { const rect = event.currentTarget.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) setModal(null) } }} aria-labelledby="dialog-title">
         <button className="dialog-close icon-button" onClick={() => setModal(null)} aria-label="창 닫기"><X size={20} /></button>
-        {modal === 'help' && <><h2 id="dialog-title">이용 방법</h2><ul className="help-summary"><li>링크를 가진 누구나 목록을 편집할 수 있어요.</li><li>상 60% · 중 35% · 하 4.9% · 극하 0.1%</li><li>알을 뽑고, 눌러서 벌칙을 확인하세요.</li><li>같은 등급의 벌칙은 동일 확률로 나와요.</li><li>네 등급마다 추첨 가능한 항목이 필요해요.</li><li>‘중복 제외’로 비워진 등급은 ‘전체 포함’으로 복원하세요.</li></ul><p className="privacy-note">목록은 모두 공유 · 알과 기록은 내 브라우저에 저장됩니다.</p>{hasLocalImport && <button className="import-local text-button" disabled={editorLocked} onClick={importLocalItems}>이 기기의 목록 가져오기</button>}<Button label="닫기" variant="primary" width="100%" onClick={() => setModal(null)} /></>}
+        {modal === 'help' && <><h2 id="dialog-title">이용 방법</h2><ul className="help-summary"><li>링크를 가진 누구나 목록을 편집할 수 있어요.</li><li>상 60% · 중 35% · 하 4.9% · 극하 0.1%</li><li>카드를 펼치고, 한 장을 골라주세요.</li><li>같은 등급의 벌칙은 동일 확률로 나와요.</li><li>네 등급마다 추첨 가능한 항목이 필요해요.</li><li>‘중복 제외’로 비워진 등급은 ‘전체 포함’으로 복원하세요.</li></ul><p className="privacy-note">목록은 모두 공유 · 카드와 기록은 내 브라우저에 저장됩니다.</p>{hasLocalImport && <button className="import-local text-button" disabled={editorLocked} onClick={importLocalItems}>이 기기의 목록 가져오기</button>}<Button label="닫기" variant="primary" width="100%" onClick={() => setModal(null)} /></>}
         {modal === 'bulk' && <form onSubmit={addBulk}><h2 id="dialog-title">한 번에 추가</h2><p className="dialog-description">{tier.label} 등급 · 한 줄에 하나씩.</p><label className="bulk-label" htmlFor="bulk-items">추가할 항목 <span>{MAX_ITEMS - state.items.length}개까지</span></label><textarea id="bulk-items" value={bulkText} onChange={event => setBulkText(event.target.value)} placeholder={'청소 20분\n설거지 전담\n친구에게 커피 사기'} rows={7} maxLength={MAX_ITEMS * (MAX_LABEL_LENGTH + 2)} aria-describedby={bulkError ? 'bulk-error' : undefined} aria-invalid={!!bulkError} />{bulkError && <p className="form-error" id="bulk-error" role="alert">{bulkError}</p>}<Button label="추가하기" type="submit" variant="primary" width="100%" icon={<Plus size={17} />} /></form>}
         {modal === 'new' && <><h2 id="dialog-title">목록 초기화</h2><p className="dialog-description">모두의 목록이 바뀝니다. 내 기록도 초기화됩니다.</p><Stack direction="horizontal" gap={2}><Button label="비우기" width="100%" onClick={() => resetItems(false)} /><Button label="기본 벌칙" variant="primary" width="100%" onClick={() => resetItems(true)} /></Stack></>}
       </dialog>
