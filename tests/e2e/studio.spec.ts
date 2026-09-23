@@ -1,8 +1,30 @@
 import { expect, test, type Page } from '@playwright/test'
+import { DEFAULT_ITEMS } from '../../src/lib/draw'
 
 const tierTabs = ['상 60%', '중 35%', '하 4.9%', '극하 0.1%'] as const
 const tierLabels = ['상', '중', '하', '극하'] as const
 const tierIds = ['high', 'medium', 'low', 'ultra'] as const
+
+test.beforeEach(async ({ page }) => {
+  let board = { items: structuredClone(DEFAULT_ITEMS), revision: 1, updated_at: new Date().toISOString() }
+  const responses = new Map<string, typeof board>()
+  const headers = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'POST, OPTIONS' }
+  await page.route('**/rest/v1/rpc/bbob_*', async route => {
+    if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers })
+    if (route.request().url().endsWith('/bbob_get_board')) return route.fulfill({ json: board, headers })
+    const params = route.request().postDataJSON()
+    const replay = responses.get(params.p_request_id)
+    if (replay) return route.fulfill({ json: { status: 'ok', board: replay }, headers })
+    if (params.p_expected_revision !== board.revision) return route.fulfill({ json: { status: 'conflict', board }, headers })
+    board = { items: params.p_items, revision: board.revision + 1, updated_at: new Date().toISOString() }
+    responses.set(params.p_request_id, structuredClone(board))
+    return route.fulfill({ json: { status: 'ok', board }, headers })
+  })
+})
+
+async function waitForShared(page: Page) {
+  await expect(page.locator('.save-status')).toContainText('공유됨')
+}
 
 async function openStudio(page: Page) {
   await page.goto('/')
@@ -10,6 +32,7 @@ async function openStudio(page: Page) {
   await expect(page.locator('#page-title')).toHaveText('러닝 약속')
   await expect(page.getByText('이틀 연속 쉬면, 벌칙 하나.', { exact: true })).toBeVisible()
   for (const name of tierTabs) await expect(page.getByRole('tab', { name, exact: true })).toBeVisible()
+  await waitForShared(page)
 }
 
 async function fixedRandom(page: Page, samples: number[]) {
@@ -36,6 +59,7 @@ async function selectTier(page: Page, index: number) {
 
 async function startEmpty(page: Page) {
   await page.getByRole('button', { name: '초기화', exact: true }).click()
+  await expect(page.getByRole('dialog')).toContainText('모두의 목록이 바뀝니다.')
   await page.getByRole('dialog').getByRole('button', { name: '비우기', exact: true }).click()
   await expect(page.locator('.item-row')).toHaveCount(0)
 }
@@ -109,6 +133,7 @@ test('text edits, tier moves, deletion undo and reload retain custom choices', a
   await page.getByRole('button', { name: '항목 추가', exact: true }).click()
   await expect(page.getByRole('textbox', { name: '항목 3 이름', exact: true })).toBeFocused()
   await page.getByRole('textbox', { name: '항목 3 이름', exact: true }).fill('추가한 벌칙')
+  await waitForShared(page)
   await page.reload()
   await selectTier(page, 1)
   await expect(page.locator('.item-row')).toHaveCount(3)
@@ -249,6 +274,7 @@ test('Space ignores input controls and pending eggs; mutations lock during anima
   await page.getByRole('textbox', { name: '항목 1 이름', exact: true }).focus()
   await page.keyboard.press('Space')
   await expect(page.locator('.history-list li')).toHaveCount(0)
+  await waitForShared(page)
   await page.locator('h1').click()
   await page.keyboard.press('Space')
   await expect(page.getByRole('button', { name: '뽑는 중…', exact: true })).toBeDisabled()
